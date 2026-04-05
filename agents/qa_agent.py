@@ -26,6 +26,21 @@ class QAAgent:
     def __init__(self, bus: MessageBus):
         self.bus = bus
 
+    def _issue_text(self, issue) -> str:
+        if isinstance(issue, str):
+            return issue
+        if isinstance(issue, dict):
+            parts = []
+            for key in ("issue", "text", "message", "detail"):
+                value = issue.get(key)
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+                    break
+            if not parts:
+                parts.append(json.dumps(issue, ensure_ascii=False))
+            return parts[0]
+        return str(issue)
+
     def run(self) -> None:
         messages = self.bus.receive("qa")
         for msg in messages:
@@ -89,7 +104,8 @@ class QAAgent:
         issues = report.get("html_issues", []) + report.get("copy_issues", [])
         lines_to_comment = [5, 10]
         for i, issue in enumerate(issues[:2]):
-            body = f"**QA Review:** {issue}"
+            issue_text = self._issue_text(issue)
+            body = f"**QA Review:** {issue_text}"
             payload = {
                 "body": body,
                 "commit_id": commit_id,
@@ -103,6 +119,6 @@ class QAAgent:
                 json=payload,
             )
             if r.status_code in (200, 201):
-                print(f"[QA] Posted PR comment: {issue[:60]}...")
+                print(f"[QA] Posted PR comment: {issue_text[:60]}...")
             else:
                 print(f"[QA] Failed to post comment (status {r.status_code})")

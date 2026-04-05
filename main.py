@@ -78,7 +78,11 @@ def run():
     if not marketing_msgs:
         print("[MAIN] ERROR: No response from Marketing agent. Exiting.")
         return
-    copy = marketing_msgs[0]["payload"]["copy"]
+    marketing_payload = marketing_msgs[0]["payload"]
+    copy = marketing_payload["copy"]
+    email_sent = marketing_payload.get("email_sent", False)
+    if not email_sent:
+        print(f"[MAIN] WARNING: Marketing email was not sent. Reason: {marketing_payload.get('email_error', 'unknown')}")
 
     # ── Phase 8: QA agent ─────────────────────────────────────────────────
     print("\n[MAIN] Phase 8: QA agent reviews HTML and copy")
@@ -98,7 +102,7 @@ def run():
 
     # ── Phase 9: CEO reviews QA (second feedback loop) ────────────────────
     print("\n[MAIN] Phase 9: CEO reviews QA verdict")
-    revision_decision = ceo.review_qa_report(qa_report, html_content, copy, pr_url)
+    revision_decision = ceo.review_qa_report(qa_report, spec, html_content, copy, pr_url)
 
     if revision_decision.get("engineer_needs_revision"):
         print("[MAIN] Engineer revision requested — running Engineer agent again...")
@@ -120,7 +124,7 @@ def run():
 
     # ── Phase 10: CEO posts final summary to Slack ─────────────────────────
     print("\n[MAIN] Phase 10: CEO posts final summary to Slack")
-    ceo.post_final_summary(spec, pr_url, email_sent=True)
+    ceo.post_final_summary(spec, pr_url, email_sent=email_sent)
 
     # ── Print full message history ─────────────────────────────────────────
     bus.print_history()

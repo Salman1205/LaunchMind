@@ -3,6 +3,7 @@ from slack_sdk import WebClient
 from message_bus import MessageBus
 from llm_client import call_llm
 from config import SLACK_BOT_TOKEN, SLACK_CHANNEL
+from slack_utils import post_blocks_with_auto_join
 
 DECOMPOSE_SYSTEM = """You are a startup CEO. Break a startup idea into tasks for your team.
 Return a JSON object with these keys:
@@ -37,14 +38,56 @@ class CEOAgent:
         print(f"[CEO] {decision}")
         self._decisions.append(decision)
 
+    def _try_parse_json(self, raw: str) -> dict | None:
+        candidates = []
+
+        text = raw.strip()
+        if text:
+            candidates.append(text)
+
+        cleaned = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            extracted = cleaned[start:end + 1]
+            if extracted not in candidates:
+                candidates.append(extracted)
+
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    def _fallback_product_review(self, spec: dict) -> dict:
+        value = spec.get("value_proposition", "")
+        if value:
+            return {"verdict": "acceptable", "feedback": ""}
+        return {
+            "verdict": "needs_revision",
+            "feedback": "The product spec is missing a clear value proposition."
+        }
+
+    def _fallback_qa_review(self) -> dict:
+        return {
+            "engineer_needs_revision": True,
+            "marketing_needs_revision": True,
+            "engineer_feedback": "Add a doctype, proper metadata, and verify every HTML tag is closed.",
+            "marketing_feedback": "Tighten the copy so it consistently highlights 48-hour delivery and cleaner grammar.",
+        }
+
     def decompose_and_send(self) -> None:
         self.log(f"Decomposing idea: {self.startup_idea}")
         raw = call_llm(DECOMPOSE_SYSTEM, f"Startup idea: {self.startup_idea}")
-        try:
-            tasks = json.loads(raw)
-        except json.JSONDecodeError:
-            cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            tasks = json.loads(cleaned)
+        tasks = self._try_parse_json(raw)
+        if tasks is None:
+            raise ValueError("CEO could not parse task decomposition JSON")
 
         self.log("Sending task to Product agent")
         self.bus.send("ceo", "product", "task", {
@@ -55,11 +98,10 @@ class CEOAgent:
     def review_product_spec(self, spec: dict) -> dict:
         self.log("Reviewing product spec with LLM...")
         raw = call_llm(REVIEW_SPEC_SYSTEM, f"Product spec:\n{json.dumps(spec, indent=2)}")
-        try:
-            review = json.loads(raw)
-        except json.JSONDecodeError:
-            cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            review = json.loads(cleaned)
+        review = self._try_parse_json(raw)
+        if review is None:
+            print("[CEO] WARNING: Using fallback product review after JSON parse failure.")
+            review = self._fallback_product_review(spec)
 
         self.log(f"Product spec verdict: {review['verdict']}")
         if review["verdict"] == "needs_revision":
@@ -79,6 +121,7 @@ class CEOAgent:
     def review_qa_report(
         self,
         report: dict,
+        spec: dict,
         engineer_html: str,
         marketing_copy: dict,
         engineer_pr_url: str,
@@ -97,16 +140,15 @@ class CEOAgent:
             f"What should the Engineer and Marketing agents fix?"
         )
         raw = call_llm(REVIEW_QA_SYSTEM, user_prompt)
-        try:
-            decision = json.loads(raw)
-        except json.JSONDecodeError:
-            cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-            decision = json.loads(cleaned)
+        decision = self._try_parse_json(raw)
+        if decision is None:
+            print("[CEO] WARNING: Using fallback QA review after JSON parse failure.")
+            decision = self._fallback_qa_review()
 
         if decision.get("engineer_needs_revision"):
             self.log(f"Requesting Engineer revision: {decision['engineer_feedback']}")
             self.bus.send("ceo", "engineer", "revision_request", {
-                "product_spec": {"value_proposition": ""},
+                "product_spec": spec,
                 "feedback": decision["engineer_feedback"],
                 "pr_url": engineer_pr_url,
             })
@@ -114,7 +156,7 @@ class CEOAgent:
         if decision.get("marketing_needs_revision"):
             self.log(f"Requesting Marketing revision: {decision['marketing_feedback']}")
             self.bus.send("ceo", "marketing", "revision_request", {
-                "product_spec": {"value_proposition": ""},
+                "product_spec": spec,
                 "feedback": decision["marketing_feedback"],
                 "pr_url": engineer_pr_url,
             })
@@ -131,9 +173,10 @@ class CEOAgent:
             + "\n".join(f"  • {d}" for d in self._decisions[-5:])
         )
         client = WebClient(token=SLACK_BOT_TOKEN)
-        client.chat_postMessage(
-            channel=SLACK_CHANNEL,
-            blocks=[
+        post_blocks_with_auto_join(
+            client,
+            SLACK_CHANNEL,
+            [
                 {
                     "type": "header",
                     "text": {"type": "plain_text", "text": "LaunchMind: Pipeline Complete"},
